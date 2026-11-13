@@ -1,0 +1,15 @@
+{
+  "name": "Vistazo GeForce NOW",
+  "author": "m4rz3r0",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": [
+      "library",
+      "cloud",
+      "vistazo"
+    ],
+    "description": "Add-on for Vistazo: a button to play a Steam game on GeForce NOW, through Nvidia's own app.",
+    "image": ""
+  }
+}
