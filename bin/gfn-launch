@@ -1,0 +1,59 @@
+#!/usr/bin/python3 -I
+# Opens one game in Nvidia's GeForce NOW app. Steam runs this with a single argument: Nvidia's
+# number for the game. Only a number the add-on's backend wrote in the private list beside this
+# launcher is accepted, and what Nvidia's app receives is built here from that number alone: no
+# text from Steam's launch options ever reaches a shell or the app.
+import json
+import os
+import stat
+import sys
+
+NVIDIA_APP = "com.nvidia.geforcenow"
+
+
+def route(game_id):
+    """What tells Nvidia's app to go straight to one game.
+
+    NOT VERIFIED on the Deck: this is the form Nvidia's Windows program takes, and whether the
+    Deck's app understands it has yet to be seen. If it does not, this is the one place to change."""
+    return "--url-route=#?cmsId=%s&launchSource=External" % game_id
+
+
+def fail(why):
+    sys.stderr.write("gfn-launch: %s\n" % why)
+    return 2
+
+
+def allowed(table_file, game_id):
+    """None when that game may be opened, or the reason why not."""
+    if not (game_id.isascii() and game_id.isdigit() and len(game_id) <= 12):
+        return "not a game number"
+    try:
+        info = os.lstat(table_file)
+        # Only a plain file of this user that nobody else can write is believed.
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            return "the game list is not private"
+        with open(table_file, encoding="utf-8") as f:
+            table = json.load(f)
+    except (OSError, ValueError):
+        return "no game list"
+    if not isinstance(table, dict) or table.get(game_id) is not True:
+        return "game not prepared"
+    return None
+
+
+def main(argv):
+    if len(argv) != 2:
+        return fail("expected one game number")
+    here = os.path.dirname(os.path.realpath(__file__))
+    why = allowed(os.path.join(here, "launch.json"), argv[1])
+    if why:
+        return fail(why)
+    try:
+        os.execvp("flatpak", ["flatpak", "run", NVIDIA_APP, route(argv[1])])
+    except OSError as e:
+        return fail("flatpak did not start: %s" % e)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
