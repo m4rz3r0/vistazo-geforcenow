@@ -202,7 +202,7 @@ def test_catalogue():
     check("one address", {a[0] for a in nvidia.asked}, {"/services/gfngames/v1/gameList"})
     check("content type", {a[1] for a in nvidia.asked}, {"application/json"})
     first = nvidia.asked[0][2]
-    check("the question is the bare query", first.startswith('{apps(country:"US" language:"en_US" first:1200)'))
+    check("the question is the bare query", first.startswith('{apps(country:"US" language:"en_US" first:700)'))
     check("asks only for the link", first.endswith("items{variants{appStore storeId id}}}}"))
     check("cursors followed", [re.findall(r'after:"([^"]*)"', a[2]) for a in nvidia.asked], [[], ["page1"], ["page2"]])
     check("kept on disk", kept()["games"], WANTED)

@@ -18,7 +18,7 @@ import decky
 CATALOGUE_URL = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"
 COUNTRY = "US"
 LANGUAGE = "en_US"
-PAGE = 1200  # games asked for at a time
+PAGE = 700  # games asked for at a time (Nvidia takes 750 at most)
 MAX_PAGES = 20  # the whole list is five or six pages today
 MAX_BYTES = 8 * 1024 * 1024  # per answer
 TIMEOUT = 15
