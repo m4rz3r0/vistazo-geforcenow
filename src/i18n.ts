@@ -25,6 +25,18 @@ const en = {
   needsVistazo: "This add-on needs Vistazo: its button shows on Vistazo's game pages.",
   notStarted: "The game could not be started.",
   notCarried: "GeForce NOW does not carry this game any more.",
+  yourGames: "Games of your choice",
+  yourGamesHint: "Any game GeForce NOW carries, also from other shops, as an entry of its own in Steam.",
+  addGame: "Add a game",
+  remove: "Remove",
+  searchTitle: "Add a game from GeForce NOW",
+  searchLabel: "Name of the game",
+  searchHint: "Type at least two letters.",
+  nothingFound: "No game by that name on GeForce NOW.",
+  added: "Added",
+  adding: "Adding…",
+  notAdded: "The game could not be added.",
+  close: "Close",
 };
 
 const es: typeof en = {
@@ -45,9 +57,36 @@ const es: typeof en = {
   needsVistazo: "Este complemento necesita Vistazo: su botón aparece en las páginas de juego de Vistazo.",
   notStarted: "No se ha podido iniciar el juego.",
   notCarried: "GeForce NOW ya no tiene este juego.",
+  yourGames: "Juegos que tú eliges",
+  yourGamesHint: "Cualquier juego que tenga GeForce NOW, también de otras tiendas, con su propia entrada en Steam.",
+  addGame: "Añadir un juego",
+  remove: "Quitar",
+  searchTitle: "Añadir un juego de GeForce NOW",
+  searchLabel: "Nombre del juego",
+  searchHint: "Escribe al menos dos letras.",
+  nothingFound: "GeForce NOW no tiene ningún juego con ese nombre.",
+  added: "Añadido",
+  adding: "Añadiendo…",
+  notAdded: "No se ha podido añadir el juego.",
+  close: "Cerrar",
 };
 
 export const t = lang === "es" ? es : en;
+
+// A shop's name as people say it; "" for Steam, which needs no saying here.
+const SHOPS: Record<string, string> = {
+  STEAM: "",
+  EPIC: "Epic Games",
+  XBOX: "Xbox",
+  UPLAY: "Ubisoft",
+  UBISOFT: "Ubisoft",
+  GOG: "GOG",
+  EA_APP: "EA",
+  ORIGIN: "EA",
+  BATTLENET: "Battle.net",
+};
+export const shop = (store: string): string =>
+  SHOPS[store] ?? store.toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
 // How long ago the list was read, in the largest unit that fits.
 export function readAgo(seconds: number): string {

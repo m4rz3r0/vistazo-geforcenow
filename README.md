@@ -13,13 +13,14 @@ It is a separate Decky plugin so that only those who use GeForce NOW carry its c
 
 - Once a day the add-on reads Nvidia's public list of games and keeps, on the Deck, which Steam games are on it. The settings show how many there are and when the list was read, with a button to read it again.
 - The button shows only when the game is on that list and Nvidia's app is installed. There is no greyed-out button otherwise.
-- Games start through one Steam entry of the add-on's own, "GeForce NOW · Vistazo". Steam counts the play time on that entry, not on the game.
+- From the settings you can also add any game GeForce NOW carries, by name, including games of other shops (Fortnite from Epic, say). Each gets a Steam entry of its own, with its cover, that Steam's play button starts through Nvidia's app; with Vistazo they show on a GeForce NOW shelf on the home. Removing one from the settings takes its entry out of Steam.
+- Games started from a Steam game's page go through one Steam entry of the add-on's own, "GeForce NOW · Vistazo". Steam counts the play time on that entry, not on the game.
 
 ## Your account and your privacy
 
 - **The add-on never sees your Nvidia account.** You sign in once in Nvidia's own app, the first time it opens; the add-on only opens that app. It stores no name, password or session.
-- The only thing it asks the network for is Nvidia's public list of games. The question carries a country and a language ("US", English) and nothing about you, your Deck or your library.
-- It talks to that one address only, checks its certificate and does not follow redirects.
+- The only things it asks the network for are Nvidia's public list of games and, for a game you add, its cover and wide picture from Nvidia's picture server. What you type to find a game stays on the Deck. The question for the list carries a country and a language ("US", English) and nothing about you, your Deck or your library.
+- It talks to those two addresses only, checks their certificates and does not follow redirects.
 
 ## Status
 

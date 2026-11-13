@@ -11,12 +11,21 @@ export interface AddonAction {
   run(): void | Promise<void>;
 }
 
+// A shelf of the add-on's own on Vistazo's home.
+export interface AddonShelf {
+  id: string;
+  label: string;
+  apps: number[];
+}
+
 export interface Addon {
   id: string;
   name: string;
   contract: number; // the contract it was written for
   // Things to do on a Steam game's page ("play on …"). None: an empty list.
   actions?(appid: number): Promise<AddonAction[]>;
+  // Shelves of its own on the home: the player turns each on in Vistazo's settings.
+  shelves?(): AddonShelf[];
   // Its own section in Vistazo's settings (plain Decky rows).
   Settings?: ComponentType;
 }
@@ -24,7 +33,7 @@ export interface Addon {
 export interface VistazoApi {
   contract: number;
   register(addon: Addon): () => void;
-  changed(): void;
+  changed(): void; // the add-on's games changed: whatever shows them reads again
 }
 
 const READY = "vistazo:ready";

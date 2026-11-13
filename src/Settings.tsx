@@ -1,9 +1,11 @@
-import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
+import { ButtonItem, PanelSection, PanelSectionRow, showModal } from "@decky/ui";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { AddGame } from "./AddGame";
 import { refresh, status } from "./backend";
-import type { Status } from "./backend";
-import { readAgo, t } from "./i18n";
+import type { Chosen, Status } from "./backend";
+import { dropLost, removeGame, useChosen } from "./chosen";
+import { readAgo, shop, t } from "./i18n";
 import { onVistazoReady, vistazo } from "./vistazo";
 
 const Note = ({ children }: { children: ReactNode }) => (
@@ -12,12 +14,26 @@ const Note = ({ children }: { children: ReactNode }) => (
   </PanelSectionRow>
 );
 
-// The add-on's rows, the same in Vistazo's settings and in its own panel: how the list of games
-// stands, a button to read it again, and where signing in happens.
+// The add-on's section, the same in Vistazo's settings and in its own panel: how the list of
+// games stands, a button to read it again, where signing in happens, and the games the player
+// chose to have in Steam.
 export function Settings() {
   const [state, setState] = useState<Status | null>(null);
   const [reading, setReading] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [removing, setRemoving] = useState("");
+  const chosen = useChosen();
+
+  // A chosen game whose entry was removed in Steam itself is forgotten here too.
+  useEffect(() => {
+    dropLost().catch(() => undefined);
+  }, []);
+
+  const remove = async (game: Chosen) => {
+    setRemoving(game.id);
+    await removeGame(game).catch(() => undefined);
+    setRemoving("");
+  };
 
   useEffect(() => {
     let here = true;
@@ -50,7 +66,7 @@ export function Settings() {
 
   const busy = reading || !!state?.refreshing;
   return (
-    <>
+    <PanelSection title="GeForce NOW">
       <PanelSectionRow>
         <ButtonItem
           layout="below"
@@ -65,12 +81,36 @@ export function Settings() {
       {failed && <Note>{t.readFailed}</Note>}
       {state && !state.app && <Note>{t.appMissing}</Note>}
       <Note>{t.account}</Note>
-    </>
+      <PanelSectionRow>
+        <ButtonItem
+          layout="below"
+          label={t.yourGames}
+          description={t.yourGamesHint}
+          disabled={!state || state.games === 0}
+          onClick={() => showModal(<AddGame />)}
+        >
+          {t.addGame}
+        </ButtonItem>
+      </PanelSectionRow>
+      {chosen.map((game) => (
+        <PanelSectionRow key={game.id}>
+          <ButtonItem
+            layout="below"
+            label={game.title}
+            description={shop(game.store) || undefined}
+            disabled={!!removing}
+            onClick={() => remove(game)}
+          >
+            {t.remove}
+          </ButtonItem>
+        </PanelSectionRow>
+      ))}
+    </PanelSection>
   );
 }
 
-// The plugin's own panel in the Quick Access menu: the same rows, and a line when Vistazo, which
-// is where the button shows, is not there.
+// The plugin's own panel in the Quick Access menu: the same section, and a line when Vistazo,
+// which is where the button shows, is not there.
 export function OwnPanel() {
   const [there, setThere] = useState(() => !!vistazo());
   useEffect(() => {
@@ -84,9 +124,13 @@ export function OwnPanel() {
     };
   }, []);
   return (
-    <PanelSection>
-      {!there && <Note>{t.needsVistazo}</Note>}
+    <>
+      {!there && (
+        <PanelSection>
+          <Note>{t.needsVistazo}</Note>
+        </PanelSection>
+      )}
       <Settings />
-    </PanelSection>
+    </>
   );
 }

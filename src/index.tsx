@@ -1,4 +1,5 @@
 import { definePlugin } from "@decky/api";
+import { loadChosen, shelves } from "./chosen";
 import { actions } from "./play";
 import { OwnPanel, Settings } from "./Settings";
 import { CONTRACT, joinVistazo } from "./vistazo";
@@ -22,9 +23,10 @@ function CloudIcon() {
 }
 
 export default definePlugin(() => {
-  // All this plugin adds to Steam goes through Vistazo: a button on its game pages and a section
-  // in its settings. Without Vistazo it only has its own panel.
-  const leave = joinVistazo({ id: "geforcenow", name: "GeForce NOW", contract: CONTRACT, actions, Settings });
+  // What this plugin shows goes through Vistazo: a button on its game pages, a shelf on its home
+  // and a section in its settings. Without Vistazo it only has its own panel.
+  const leave = joinVistazo({ id: "geforcenow", name: "GeForce NOW", contract: CONTRACT, actions, shelves, Settings });
+  loadChosen().catch((e) => console.warn("[Vistazo GeForce NOW] chosen games", e));
   return {
     name: NAME,
     titleView: <div>{NAME}</div>,
