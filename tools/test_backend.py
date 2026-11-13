@@ -4,6 +4,7 @@
 Nothing here talks to Nvidia or touches the real home: `decky` is a stand-in pointing at the
 temporary folder, and "flatpak" is a script that only writes down what it was started with."""
 import asyncio
+import base64
 import json
 import os
 import re
@@ -51,7 +52,10 @@ class Catalogue:
     """What the pretend server answers, and what it was asked."""
 
     def __init__(self):
-        self.pages = []  # each: a list of games, each a list of (shop, shop's number, Nvidia's number)
+        # Each page: a list of games. A game: a list of (shop, shop's number, Nvidia's number), or
+        # {"title", "images", "variants": that list}.
+        self.pages = []
+        self.pictures = {}  # path -> bytes, or a (status, headers) answer
         self.asked = []  # (path, content type, question)
         self.down = False
         self.redirect_to = None
@@ -81,7 +85,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         nvidia.asked.append((self.path, None, None))
-        self.reply(405)
+        picture = nvidia.pictures.get(self.path)
+        if isinstance(picture, tuple):
+            return self.reply(picture[0], headers=picture[1])
+        if picture is None:
+            return self.reply(404)
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(picture)))
+        self.end_headers()
+        self.wfile.write(picture)
 
     def do_POST(self):
         question = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
@@ -98,8 +110,15 @@ class Handler(BaseHTTPRequestHandler):
         more = nvidia.endless or index + 1 < len(nvidia.pages)
         self.reply(200, {"data": {"apps": {
             "pageInfo": {"endCursor": nvidia.cursor or "page%d" % (index + 1), "hasNextPage": more, "totalCount": 3},
-            "items": [{"variants": [{"appStore": s, "storeId": n, "id": i} for s, n, i in game]} for game in games],
+            "items": [item(game) for game in games],
         }}, "padding": "x" * nvidia.padding})
+
+
+def item(game):
+    """A game as Nvidia writes it."""
+    if isinstance(game, list):
+        game = {"title": "Game %s" % game[0][2], "variants": game}
+    return {**game, "variants": [{"appStore": s, "storeId": n, "id": i} for s, n, i in game["variants"]]}
 
 
 class Elsewhere(BaseHTTPRequestHandler):
@@ -127,6 +146,8 @@ other = ThreadingHTTPServer(("127.0.0.1", 0), Elsewhere)
 for s in (server, other):
     threading.Thread(target=s.serve_forever, daemon=True).start()
 main.CATALOGUE_URL = "http://127.0.0.1:%d/services/gfngames/v1/gameList" % server.server_port
+ART = "http://127.0.0.1:%d/" % server.server_port
+main.ART_BASE = ART
 
 loop = asyncio.new_event_loop()
 threading.Thread(target=loop.run_forever, daemon=True).start()
@@ -203,7 +224,8 @@ def test_catalogue():
     check("content type", {a[1] for a in nvidia.asked}, {"application/json"})
     first = nvidia.asked[0][2]
     check("the question is the bare query", first.startswith('{apps(country:"US" language:"en_US" first:700)'))
-    check("asks only for the link", first.endswith("items{variants{appStore storeId id}}}}"))
+    check("asks for names, pictures and editions, nothing else", first.endswith(
+        "items{title images{GAME_BOX_ART HERO_IMAGE KEY_ART TV_BANNER} variants{appStore storeId id}}}}"))
     check("cursors followed", [re.findall(r'after:"([^"]*)"', a[2]) for a in nvidia.asked], [[], ["page1"], ["page2"]])
     check("kept on disk", kept()["games"], WANTED)
     check("file is private", mode(main.CATALOGUE_FILE), 0o600)
@@ -401,11 +423,183 @@ def test_launcher():
     check("and private", mode(main.LAUNCHER), 0o700)
 
 
+JPEG = b"\xff\xd8\xff\xe0" + os.urandom(2000)
+PNG = b"\x89PNG\r\n\x1a\n" + os.urandom(2000)
+SHOPS = [[
+    {"title": "Half-Life\u00ae 2", "images": {"GAME_BOX_ART": ART + "apps/a/box.jpg", "HERO_IMAGE": ART + "apps/a/hero.png",
+                                            "KEY_ART": ART + "apps/a/key.jpg"},
+     "variants": [("EPIC", "hl2", "19112"), ("STEAM", "220", "19111")]},
+    {"title": "Fortnite\u00ae", "images": {"GAME_BOX_ART": ART + "apps/f/box.jpg", "KEY_ART": ART + "apps/f/key.jpg"},
+     "variants": [("XBOX", "9x", "30101"), ("EPIC", "fn", "30100")]},
+    # Pictures that are not on Nvidia's picture server.
+    {"title": "Pok\u00e9mon Caf\u00e9", "images": {"GAME_BOX_ART": "https://evil.example/x.jpg",
+                                                 "HERO_IMAGE": ART[:-1] + ".evil.example/h.jpg"},
+     "variants": [("STEAM", "900", "30200")]},
+    {"title": "  Tab\tbed \n name " + "x" * 300, "images": {"GAME_BOX_ART": ART[:-1] + "@evil.example/x.jpg",
+                                                          "HERO_IMAGE": ART + "a b.jpg", "KEY_ART": ART + "a?b=c",
+                                                          "TV_BANNER": 5},
+     "variants": [("UPLAY", "u", "30300")]},
+    {"title": "Quoted", "images": {"GAME_BOX_ART": ART + 'a".jpg', "HERO_IMAGE": ART + "a\\b.jpg"}, "variants": [("GOG", "g", "30310")]},
+    # No name, an odd shop, a number that is not one: no row; the Steam link stays.
+    {"title": 7, "variants": [("STEAM", "901", "30400")]},
+    {"title": "", "variants": [("EPIC", "e", "30401")]},
+    {"title": "Odd shop", "images": "none", "variants": [("epic games", "x", "30500"), ("EPIC", "x", "abc"), ("EPIC", "x", 30501)]},
+] + [[("EPIC", "f%d" % n, str(40000 + n))] for n in range(25)]]
+
+
+def launch_list():
+    with open(main.LAUNCH_FILE) as f:
+        return json.load(f)
+
+
+def test_chosen():
+    # Left by the launcher's checks: the last game started from a Steam page.
+    check("last prepared", launch_list(), {"20000": True})
+    nvidia.pages = SHOPS
+    for n in range(25):
+        SHOPS[0][8 + n] = {"title": "Filler %02d" % n, "variants": SHOPS[0][8 + n]}
+    check("read with other shops", run(plugin.refresh())["ok"], True)
+    check("Steam links as before", kept()["games"], {"220": "19111", "900": "30200", "901": "30400"})
+    check("file still private", mode(main.CATALOGUE_FILE), 0o600)
+    rows = kept()["rows"]
+    check("a row per edition", sorted(k for k in rows if k < "40000"),
+          ["19111", "19112", "30100", "30101", "30200", "30300", "30310"])
+    check("row", rows["19111"], ["Half-Life\u00ae 2", "STEAM", ART + "apps/a/box.jpg", ART + "apps/a/hero.png"])
+    check("wide picture falls back", rows["30100"], ["Fortnite\u00ae", "EPIC", ART + "apps/f/box.jpg", ART + "apps/f/key.jpg"])
+    for n in ("30200", "30300", "30310"):
+        check("hostile pictures dropped %s" % n, rows[n][2:], ["", ""])
+    check("name tidied and cut", rows["30300"][0], ("Tab bed name " + "x" * 300)[:120])
+
+    # Search: by name, whatever the capitals, accents and signs; Steam's edition first.
+    check("found", run(plugin.search("half life")), [{"id": "19111", "title": "Half-Life\u00ae 2", "store": "STEAM"},
+                                                     {"id": "19112", "title": "Half-Life\u00ae 2", "store": "EPIC"}])
+    check("capitals and signs", [g["id"] for g in run(plugin.search("  HALF-LIFE 2 "))], ["19111", "19112"])
+    check("accents", [g["id"] for g in run(plugin.search("pokemon cafe"))], ["30200"])
+    check("accents typed", [g["id"] for g in run(plugin.search("CAF\u00c9"))], ["30200"])
+    check("other shops", [(g["id"], g["store"]) for g in run(plugin.search("fortnite"))], [("30100", "EPIC"), ("30101", "XBOX")])
+    check("starts with it first", [g["title"] for g in run(plugin.search("fi"))][:2], ["Filler 00", "Filler 01"])
+    check("at most twenty", len(run(plugin.search("filler"))), 20)
+    check("nothing by that name", run(plugin.search("zelda")), [])
+    check("sixty characters are taken", len(run(plugin.search("x" * 60))), 1)
+    check("as long as allowed still matches", len(run(plugin.search("tab bed name " + "x" * 47))), 1)
+    for bad in ("a", "  a  ", "", "x" * 61, 5, None, ["ab"], {"a": 1}, True, "\u00ae\u00ae", "--"):
+        check("search %r" % (bad,), run(plugin.search(bad)), [])
+    before = kept()
+    run(plugin.search("$(touch %s/pwned); `id`" % TMP))
+    check("the text goes nowhere", (os.path.exists(os.path.join(TMP, "pwned")), kept()), (False, before))
+
+    # Where the launcher is, for a new entry.
+    check("entry", run(plugin.entry()), {"ok": True, "exe": main.LAUNCHER, "start_dir": main.RUNTIME})
+
+    # Choosing: only a game of the catalogue, with the Steam entry made for it.
+    check("none chosen", run(plugin.chosen()), [])
+    for bad in (999, 0, -1, "abc", None, True, 1.5, "30100 ", ["30100"], "../30100"):
+        check("choose %r" % (bad,), run(plugin.choose(bad, 111)), {"ok": False})
+    for bad in (0, -5, "x", None, True, 1.5, [111], 2**40):
+        check("choose for entry %r" % (bad,), run(plugin.choose("30100", bad)), {"ok": False})
+    check("still none", run(plugin.chosen()), [])
+    check("choose", run(plugin.choose("30100", 3000000111)), {"ok": True})
+    check("choose by number", run(plugin.choose(19112, 3000000222)), {"ok": True})
+    check("not twice", run(plugin.choose("30100", 3000000333)), {"ok": False})
+    check("chosen, by name", run(plugin.chosen()), [
+        {"id": "30100", "title": "Fortnite\u00ae", "store": "EPIC", "appid": 3000000111},
+        {"id": "19112", "title": "Half-Life\u00ae 2", "store": "EPIC", "appid": 3000000222}])
+    check("kept with the settings", os.path.dirname(main.CHOSEN_FILE), decky.DECKY_PLUGIN_SETTINGS_DIR)
+    check("chosen file is private", mode(main.CHOSEN_FILE), 0o600)
+    check("no half-written copy", os.path.exists(main.CHOSEN_FILE + ".tmp"), False)
+
+    # The launcher may open every chosen game and the last one started from a Steam page.
+    check("launcher's list", launch_list(), {"30100": True, "19112": True, "20000": True})
+    check("list is private", mode(main.LAUNCH_FILE), 0o600)
+    check("a chosen game starts", launch("30100").returncode, 0)
+    with open(SEEN) as f:
+        check("its route", json.load(f), ["run", "com.nvidia.geforcenow", "--url-route=#?cmsId=30100&launchSource=External"])
+    check("Steam pages still work", run(plugin.prepare(220))["options"], "19111")
+    check("list after a Steam page", launch_list(), {"30100": True, "19112": True, "19111": True})
+    check("the one before is out", launch("20000").returncode, 2)
+    check("chosen ones stay", launch("19112").returncode, 0)
+
+    # A chosen game outlives a catalogue that drops it, and a restart.
+    nvidia.pages = PAGES
+    check("catalogue without them", run(plugin.refresh())["ok"], True)
+    check("not found any more", run(plugin.search("fortnite")), [])
+    check("still chosen", [g["id"] for g in run(plugin.chosen())], ["30100", "19112"])
+    os.remove(main.LAUNCH_FILE)
+    run(plugin._main())
+    check("list put back on start", launch_list(), {"30100": True, "19112": True, "19111": True})
+
+    # Removing.
+    for bad in (999, "abc", None, True, 0, "30100;id", "40001"):
+        check("unchoose %r" % (bad,), run(plugin.unchoose(bad)), {"ok": False})
+    check("unchoose", run(plugin.unchoose("30100")), {"ok": True})
+    check("not twice", run(plugin.unchoose("30100")), {"ok": False})
+    check("one left", [g["id"] for g in run(plugin.chosen())], ["19112"])
+    check("list without it", launch_list(), {"19112": True, "19111": True})
+    check("no longer starts", launch("30100").returncode, 2)
+    check("the last one", run(plugin.unchoose(19112)), {"ok": True})
+    check("only the Steam page's", launch_list(), {"19111": True})
+
+    # A file someone damaged is not believed.
+    with open(main.CHOSEN_FILE, "w") as f:
+        json.dump({"last": "1; id", "games": {"30100": {"title": "Fortnite", "store": "EPIC", "appid": 5}, "x": {},
+                                            "7": {"title": "", "store": "EPIC", "appid": 5}, "8": "no",
+                                            "9": {"title": "T", "store": "EPIC", "appid": "$(id)"}}}, f)
+    check("only what is whole", run(plugin.chosen()), [{"id": "30100", "title": "Fortnite", "store": "EPIC", "appid": 5}])
+    run(plugin._main())
+    check("and nothing else for the launcher", launch_list(), {"30100": True})
+    with open(main.CHOSEN_FILE, "w") as f:
+        f.write("[]")
+    check("broken: none", run(plugin.chosen()), [])
+
+
+def test_art():
+    nvidia.pages = SHOPS
+    run(plugin.refresh())
+    nvidia.pictures = {"/apps/a/box.jpg": JPEG, "/apps/a/hero.png": PNG, "/apps/f/box.jpg": b"<html>not a picture</html>"}
+    got = run(plugin.art("19111", "box"))
+    check("cover", (got["ok"], got["kind"], base64.b64decode(got["data"]) == JPEG), (True, "jpg", True))
+    got = run(plugin.art(19111, "hero"))
+    check("wide picture", (got["ok"], got["kind"], base64.b64decode(got["data"]) == PNG), (True, "png", True))
+    check("not a picture", run(plugin.art("30100", "box")), {"ok": False})
+    check("not there", run(plugin.art("30100", "hero")), {"ok": False})
+
+    # Too large, exactly at the limit, and a redirect.
+    main.ART_BYTES = 3000
+    nvidia.pictures["/apps/f/key.jpg"] = (JPEG + bytes(3000))[:3001]
+    check("too large", run(plugin.art("30100", "hero")), {"ok": False})
+    nvidia.pictures["/apps/f/key.jpg"] = (JPEG + bytes(3000))[:3000]
+    check("as large as allowed", run(plugin.art("30100", "hero"))["ok"], True)
+    main.ART_BYTES = 6 * 1024 * 1024
+    nvidia.pictures["/apps/f/key.jpg"] = (302, [("Location", "http://127.0.0.1:%d/x.jpg" % other.server_port)])
+    check("redirect refused", run(plugin.art("30100", "hero")), {"ok": False})
+    check("nothing went elsewhere", Elsewhere.hits, [])
+
+    # Games without a picture on Nvidia's server, and what is not a game or a kind of picture.
+    nvidia.asked.clear()
+    for n in ("30200", "30300", "30310"):
+        for kind in ("box", "hero"):
+            check("no picture %s %s" % (n, kind), run(plugin.art(n, kind)), {"ok": False})
+    for bad in ("BOX", "../box", "", None, 2, ["box"], "logo", True):
+        check("kind %r" % (bad,), run(plugin.art("19111", bad)), {"ok": False})
+    for bad in (999, "abc", None, True, 0, "19111/../x", "https://evil.example/x.jpg"):
+        check("picture of %r" % (bad,), run(plugin.art(bad, "box")), {"ok": False})
+    check("nothing was asked for those", nvidia.asked, [])
+    for bad in ("https://evil.example/x.jpg", "http://127.0.0.1:%d/x.jpg" % other.server_port, ART[:-1] + "@evil.example/x.jpg",
+                ART + "a b.jpg", ART + "a?x=1", ART, "", None, 5, "file:///etc/passwd"):
+        check("address %r" % (bad,), main._fetch_art(bad), None)
+    check("still nothing asked", (nvidia.asked, Elsewhere.hits), ([], []))
+    # The real picture server is the only one allowed outside these checks.
+    check("picture server", main.ART_BASE == ART and "ART_BASE = \"https://img.nvidiagrid.net/\"" in open(
+        os.path.join(REPO, "main.py")).read())
+
+
 try:
     test_catalogue()
     test_stale()
     test_caps()
     test_launcher()
+    test_chosen()
+    test_art()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

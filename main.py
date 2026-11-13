@@ -1,7 +1,9 @@
-# This backend knows two things: which Steam games Nvidia's GeForce NOW carries (from Nvidia's
-# public catalogue, read once a day) and whether Nvidia's own app is on the Deck. It never sees
-# the player's Nvidia account: signing in happens in Nvidia's app, which this add-on only opens.
+# This backend knows which games Nvidia's GeForce NOW carries (from Nvidia's public catalogue,
+# read once a day), whether Nvidia's own app is on the Deck, and which games the player chose to
+# have as Steam entries. It never sees the player's Nvidia account: signing in happens in
+# Nvidia's app, which this add-on only opens.
 import asyncio
+import base64
 import json
 import os
 import re
@@ -9,6 +11,7 @@ import ssl
 import subprocess
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 
@@ -33,16 +36,30 @@ CA_FILES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/ca-certificates/extracte
 
 RUNTIME = decky.DECKY_PLUGIN_RUNTIME_DIR
 CATALOGUE_FILE = os.path.join(RUNTIME, "catalogue.json")
+# The games the player chose to have in Steam, and the last one started from a Steam game's page.
+CHOSEN_FILE = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "chosen.json")
+# Pictures come from Nvidia's picture server and nowhere else.
+ART_BASE = "https://img.nvidiagrid.net/"
+ART_BYTES = 6 * 1024 * 1024
+ART_KINDS = {"box": 2, "hero": 3}  # where each picture's address sits in a game's row
+MAX_TITLE = 120
+MAX_FOUND = 20
 # The launcher Steam starts, and beside it the one game it may open.
 LAUNCHER_SOURCE = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "gfn-launch")
 LAUNCHER = os.path.join(RUNTIME, "gfn-launch")
 LAUNCH_FILE = os.path.join(RUNTIME, "launch.json")
 
 _CURSOR = re.compile(r"[A-Za-z0-9+/=_-]{1,200}")
+_ART_PATH = re.compile(r"[A-Za-z0-9/._~%-]{1,400}")
+_STORE = re.compile(r"[A-Z0-9_]{1,24}")
 
 _lock = threading.Lock()  # guards the values below
 _reading = threading.Lock()  # held while the catalogue is being read from Nvidia
-_catalogue = None  # {"read": seconds, "games": {steam number: nvidia number}}; None: not loaded yet
+# {"read": seconds, "games": {steam number: nvidia number},
+#  "rows": {nvidia number: [title, shop, cover address, wide picture address]}}; None: not loaded yet
+_catalogue = None
+_folded = (None, {})  # (the rows these were made from, {nvidia number: title as it is searched})
+_chosen_lock = threading.Lock()  # held while the chosen games' file is read and written
 _tried = None  # when the last read from Nvidia started (monotonic)
 _app = (None, False)  # (when it was checked, whether Nvidia's app is installed)
 
@@ -94,10 +111,11 @@ def _number(v):
 
 
 def _query(after):
-    """The question for one page of the catalogue: only what links a Steam game to Nvidia's."""
+    """The question for one page of the catalogue: each game's name, pictures and editions."""
     page = 'first:%d after:"%s"' % (PAGE, after) if after else "first:%d" % PAGE
     return ('{apps(country:"%s" language:"%s" %s){pageInfo{endCursor hasNextPage totalCount} '
-            "items{variants{appStore storeId id}}}}" % (COUNTRY, LANGUAGE, page))
+            "items{title images{GAME_BOX_ART HERO_IMAGE KEY_ART TV_BANNER} variants{appStore storeId id}}}}"
+            % (COUNTRY, LANGUAGE, page))
 
 
 def _page(after):
@@ -124,27 +142,62 @@ def _page(after):
     return None
 
 
-def _steam_games(items, games):
-    """Adds to `games` the Steam editions among one page's games."""
+def _art_url(v):
+    """A picture's address when it is on Nvidia's picture server, written plainly; else ""."""
+    if isinstance(v, str) and v.startswith(ART_BASE) and _ART_PATH.fullmatch(v[len(ART_BASE):]):
+        return v
+    return ""
+
+
+def _title(v):
+    """A game's name without odd characters and of a sane length; "" when there is none."""
+    if not isinstance(v, str):
+        return ""
+    return " ".join("".join(c if c.isprintable() else " " for c in v).split())[:MAX_TITLE].strip()
+
+
+def _row(v):
+    """A game's row as it is kept, when every part of it is what it should be; else None."""
+    if not isinstance(v, list) or len(v) != 4 or not all(isinstance(x, str) for x in v):
+        return None
+    title, store = _title(v[0]), v[1]
+    if not title or not _STORE.fullmatch(store):
+        return None
+    return [title, store, _art_url(v[2]), _art_url(v[3])]
+
+
+def _editions(items, games, rows):
+    """Adds one page's games: to `rows` every edition, to `games` the Steam ones by Steam's number."""
     for item in items if isinstance(items, list) else ():
-        variants = item.get("variants") if isinstance(item, dict) else None
+        if not isinstance(item, dict):
+            continue
+        images = item.get("images") if isinstance(item.get("images"), dict) else {}
+        box = _art_url(images.get("GAME_BOX_ART"))
+        hero = next(filter(None, (_art_url(images.get(k)) for k in ("HERO_IMAGE", "KEY_ART", "TV_BANNER"))), "")
+        variants = item.get("variants")
         for variant in variants if isinstance(variants, list) else ():
-            if not isinstance(variant, dict) or variant.get("appStore") != "STEAM":
+            if not isinstance(variant, dict):
                 continue
-            steam, nvidia = _digits(variant.get("storeId")), _digits(variant.get("id"))
-            if steam and nvidia:
+            nvidia = _digits(variant.get("id"))
+            if not nvidia:
+                continue
+            row = _row([item.get("title"), variant.get("appStore"), box, hero])
+            if row:
+                rows.setdefault(nvidia, row)
+            steam = _digits(variant.get("storeId"))
+            if variant.get("appStore") == "STEAM" and steam:
                 games.setdefault(steam, nvidia)
 
 
 def _read_catalogue():
-    """{Steam number: Nvidia's number} for the whole catalogue, or None when any page failed:
-    half a catalogue would hide games that are there."""
-    games, after = {}, ""
+    """({Steam number: Nvidia's number}, {Nvidia's number: row}) for the whole catalogue, or None
+    when any page failed: half a catalogue would hide games that are there."""
+    games, rows, after = {}, {}, ""
     for _ in range(MAX_PAGES):
         apps = _page(after)
         if apps is None:
             return None
-        _steam_games(apps.get("items"), games)
+        _editions(apps.get("items"), games, rows)
         info = apps.get("pageInfo")
         if not isinstance(info, dict) or info.get("hasNextPage") is not True:
             break
@@ -153,19 +206,24 @@ def _read_catalogue():
         if not isinstance(after, str) or not _CURSOR.fullmatch(after):
             return None
     # Past the last allowed page what was read is kept: more than that is not a real catalogue.
-    return games or None
+    return (games, rows) if games else None
 
 
 def _load_catalogue():
     try:
         with open(CATALOGUE_FILE, encoding="utf-8") as f:
             data = json.load(f)
-        read, games = data["read"], data["games"]
+        read, games, rows = data["read"], data["games"], data.get("rows")
         if isinstance(read, (int, float)) and not isinstance(read, bool) and isinstance(games, dict):
-            return {"read": read, "games": {k: v for k, v in games.items() if _digits(k) and _digits(v)}}
+            games = {k: v for k, v in games.items() if _digits(k) and _digits(v)}
+            if not isinstance(rows, dict):
+                # A copy from before names were kept: good for Steam pages, and due to be read again.
+                return {"read": None, "games": games, "rows": {}}
+            rows = {k: _row(v) for k, v in rows.items() if _digits(k)}
+            return {"read": read, "games": games, "rows": {k: v for k, v in rows.items() if v}}
     except (OSError, ValueError, KeyError, TypeError):
         pass
-    return {"read": None, "games": {}}
+    return {"read": None, "games": {}, "rows": {}}
 
 
 def _current():
@@ -192,10 +250,10 @@ def _refresh(wait):
     try:
         with _lock:
             _tried = time.monotonic()
-        games = _read_catalogue()
-        if not games:
+        read = _read_catalogue()
+        if not read:
             return False
-        fresh = {"read": int(time.time()), "games": games}
+        fresh = {"read": int(time.time()), "games": read[0], "rows": read[1]}
         with _lock:
             _catalogue = fresh
         _write_private(CATALOGUE_FILE, fresh)
@@ -259,6 +317,82 @@ def _install_launcher():
         return False
 
 
+def _fold(text):
+    """A name as it is compared: no accents, no capitals, no signs."""
+    plain = "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)).casefold()
+    return " ".join("".join(c if c.isalnum() else " " for c in plain).split())
+
+
+def _search(text):
+    """The catalogue's games whose name holds `text`: those that start with it first, and of one
+    game's editions Steam's first."""
+    global _folded
+    wanted = _fold(text)
+    if not wanted:
+        return []
+    rows = _current()["rows"]
+    with _lock:
+        made_from, names = _folded
+    if made_from is not rows:
+        names = {nvidia: _fold(row[0]) for nvidia, row in rows.items()}
+        with _lock:
+            _folded = (rows, names)
+    found = [nvidia for nvidia, name in names.items() if wanted in name]
+    found.sort(key=lambda n: (not names[n].startswith(wanted), names[n], rows[n][1] != "STEAM", rows[n][1], int(n)))
+    return [{"id": n, "title": rows[n][0], "store": rows[n][1]} for n in found[:MAX_FOUND]]
+
+
+def _read_chosen():
+    """{"games": {Nvidia's number: {title, store, appid}}, "last": Nvidia's number or None}."""
+    data = {"games": {}, "last": None}
+    try:
+        with open(CHOSEN_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        for nvidia, game in raw["games"].items():
+            row = _row([game.get("title"), game.get("store"), "", ""]) if isinstance(game, dict) else None
+            appid = _number(game.get("appid")) if row else None
+            if _digits(nvidia) and row and appid:
+                data["games"][nvidia] = {"title": row[0], "store": row[1], "appid": appid}
+        data["last"] = _digits(raw.get("last"))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return data
+
+
+def _write_chosen(data):
+    """Keeps the chosen games and tells the launcher which games it may open: every chosen one
+    and the last one started from a Steam game's page."""
+    allowed = {nvidia: True for nvidia in data["games"]}
+    if data["last"]:
+        allowed[data["last"]] = True
+    return _write_private(CHOSEN_FILE, data) and _write_private(LAUNCH_FILE, allowed)
+
+
+def _fetch_art(url):
+    """A picture from Nvidia's picture server as (bytes, "jpg" or "png"), or None."""
+    if not _art_url(url):
+        return None
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("User-Agent", "Vistazo")
+    ctx = None
+    if url.startswith("https:"):
+        ctx = ssl.create_default_context(cafile=next((f for f in CA_FILES if os.path.isfile(f)), None))
+    try:
+        with _opener(ctx).open(req, timeout=TIMEOUT) as r:
+            raw = r.read(ART_BYTES + 1)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        decky.logger.warning("Picture not read: %s", getattr(e, "code", None) or getattr(e, "reason", e))
+        return None
+    if len(raw) > ART_BYTES:
+        return None
+    # Only what really is a picture is handed to Steam.
+    if raw.startswith(b"\xff\xd8\xff"):
+        return raw, "jpg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return raw, "png"
+    return None
+
+
 def _status(app):
     return {"app": app, "games": len(_current()["games"]), "age": _age(), "refreshing": _reading.locked()}
 
@@ -292,12 +426,73 @@ class Plugin:
             return {"ok": False, "why": "game"}
         if not await asyncio.to_thread(_app_installed):
             return {"ok": False, "why": "app"}
-        if not _install_launcher() or not _write_private(LAUNCH_FILE, {nvidia: True}):
-            return {"ok": False, "why": "error"}
+        with _chosen_lock:
+            data = _read_chosen()
+            data["last"] = nvidia
+            if not _install_launcher() or not _write_chosen(data):
+                return {"ok": False, "why": "error"}
         return {"ok": True, "exe": LAUNCHER, "start_dir": RUNTIME, "options": nvidia}
+
+    async def search(self, text):
+        """Games of the catalogue by name, for the player to choose one. `text` is only ever
+        compared with the names in memory."""
+        if not isinstance(text, str) or not 2 <= len(text.strip()) <= 60:
+            return []
+        _refresh_if_old()
+        return _search(text.strip())
+
+    async def entry(self):
+        """Where the launcher is, for a new Steam entry."""
+        if not _install_launcher():
+            return {"ok": False}
+        return {"ok": True, "exe": LAUNCHER, "start_dir": RUNTIME}
+
+    async def chosen(self):
+        """The games the player chose, by name."""
+        with _chosen_lock:
+            games = _read_chosen()["games"]
+        return sorted(({"id": n, **g} for n, g in games.items()), key=lambda g: (_fold(g["title"]), int(g["id"])))
+
+    async def choose(self, id, appid):
+        """Remembers a game the player chose and the Steam entry the frontend made for it."""
+        nvidia, appid = _digits(str(id)) if _number(id) else None, _number(appid)
+        row = _current()["rows"].get(nvidia) if nvidia else None
+        if not row or appid is None:
+            return {"ok": False}
+        with _chosen_lock:
+            data = _read_chosen()
+            if nvidia in data["games"]:
+                return {"ok": False}
+            data["games"][nvidia] = {"title": row[0], "store": row[1], "appid": appid}
+            return {"ok": _install_launcher() and _write_chosen(data)}
+
+    async def unchoose(self, id):
+        """Forgets a chosen game: the launcher will not open it any more."""
+        nvidia = _digits(str(id)) if _number(id) else None
+        with _chosen_lock:
+            data = _read_chosen()
+            if not nvidia or nvidia not in data["games"]:
+                return {"ok": False}
+            del data["games"][nvidia]
+            return {"ok": _write_chosen(data)}
+
+    async def art(self, id, kind):
+        """One of a game's pictures, for its Steam entry: the cover ("box") or the wide one ("hero")."""
+        nvidia = _digits(str(id)) if _number(id) else None
+        row = _current()["rows"].get(nvidia) if nvidia else None
+        if not row or not isinstance(kind, str) or kind not in ART_KINDS:
+            return {"ok": False}
+        got = await asyncio.to_thread(_fetch_art, row[ART_KINDS[kind]])
+        if not got:
+            return {"ok": False}
+        return {"ok": True, "data": base64.b64encode(got[0]).decode("ascii"), "kind": got[1]}
 
     async def _main(self):
         _install_launcher()
+        with _chosen_lock:
+            data = _read_chosen()
+            if data["games"] or data["last"]:
+                _write_chosen(data)
         _refresh_if_old()
 
     async def _unload(self):
