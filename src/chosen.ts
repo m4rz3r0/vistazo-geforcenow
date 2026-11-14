@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { art, choose, chosen, entry, unchoose } from "./backend";
+import { about, art, choose, chosen, entry, unchoose } from "./backend";
 import type { Chosen, Found } from "./backend";
 import { safe } from "./safe";
 import { vistazo } from "./vistazo";
-import type { AddonShelf } from "./vistazo";
+import { genre, lang, shop } from "./i18n";
+import type { AddonGame, AddonShelf } from "./vistazo";
 
 declare const SteamClient: any;
 declare const appStore: any;
@@ -51,6 +52,24 @@ export function useChosen(): Chosen[] {
 export function shelves(): AddonShelf[] {
   const apps = games.map((g) => g.appid).filter((appid) => !!overview(appid));
   return apps.length ? [{ id: "geforcenow", label: "GeForce NOW", apps }] : [];
+}
+
+// Whether a Steam entry is one of the chosen games: its page is then drawn by Vistazo, like
+// every other game's, instead of Steam's plain one.
+export const owns = (appid: number): boolean => games.some((g) => g.appid === appid);
+
+// What that page shows: where the game is played and from which shop, and what Nvidia's
+// catalogue says of it. Steam's own play button starts it, as before.
+export async function game(appid: number): Promise<AddonGame | null> {
+  const mine = games.find((g) => g.appid === appid);
+  if (!mine) return null;
+  const from = shop(mine.store);
+  const known = await about(mine.id, lang).catch(() => null);
+  return {
+    platform: from ? `GeForce NOW · ${from}` : "GeForce NOW",
+    genres: known?.ok ? (known.genres ?? []).map(genre).filter(Boolean) : [],
+    summary: (known?.ok && known.summary) || undefined,
+  };
 }
 
 // Forgets the chosen games whose Steam entry is gone (removed in Steam itself).

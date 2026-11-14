@@ -48,10 +48,17 @@ MAX_FOUND = 20
 LAUNCHER_SOURCE = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "gfn-launch")
 LAUNCHER = os.path.join(RUNTIME, "gfn-launch")
 LAUNCH_FILE = os.path.join(RUNTIME, "launch.json")
+# What the catalogue says of each chosen game (its genres and a few lines about it), for its page.
+ABOUT_FILE = os.path.join(RUNTIME, "about.json")
+ABOUT_AGE = 7 * DAY  # asked again after this long
+LANGUAGES = {"es": "es_ES", "en": "en_US"}  # the two the page is written in
+MAX_SUMMARY = 1500
+MAX_GENRES = 6
 
 _CURSOR = re.compile(r"[A-Za-z0-9+/=_-]{1,200}")
 _ART_PATH = re.compile(r"[A-Za-z0-9/._~%-]{1,400}")
 _STORE = re.compile(r"[A-Z0-9_]{1,24}")
+_GENRE = re.compile(r"[A-Z0-9_]{1,40}")
 
 _lock = threading.Lock()  # guards the values below
 _reading = threading.Lock()  # held while the catalogue is being read from Nvidia
@@ -62,6 +69,8 @@ _folded = (None, {})  # (the rows these were made from, {nvidia number: title as
 _chosen_lock = threading.Lock()  # held while the chosen games' file is read and written
 _tried = None  # when the last read from Nvidia started (monotonic)
 _app = (None, False)  # (when it was checked, whether Nvidia's app is installed)
+_about_lock = threading.Lock()  # held while the chosen games' facts are read and written
+_about_tried = {}  # {"number:language": when asking Nvidia about it last failed (monotonic)}
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -120,6 +129,11 @@ def _query(after):
 
 def _page(after):
     """One page of the catalogue as Nvidia answers it, or None when it did not come whole."""
+    return _ask(_query(after))
+
+
+def _ask(question):
+    """Nvidia's answer to one question about its catalogue, or None when it did not come whole."""
     req = urllib.request.Request(CATALOGUE_URL, method="POST")
     req.add_header("Accept", "application/json")
     req.add_header("Content-Type", "application/json")
@@ -128,7 +142,7 @@ def _page(after):
     if CATALOGUE_URL.startswith("https:"):
         ctx = ssl.create_default_context(cafile=next((f for f in CA_FILES if os.path.isfile(f)), None))
     try:
-        with _opener(ctx).open(req, data=_query(after).encode("utf-8"), timeout=TIMEOUT) as r:
+        with _opener(ctx).open(req, data=question.encode("utf-8"), timeout=TIMEOUT) as r:
             raw = r.read(MAX_BYTES + 1)
         if len(raw) > MAX_BYTES:
             decky.logger.warning("Catalogue: an answer was too long")
@@ -154,6 +168,16 @@ def _title(v):
     if not isinstance(v, str):
         return ""
     return " ".join("".join(c if c.isprintable() else " " for c in v).split())[:MAX_TITLE].strip()
+
+
+def _text(v, limit):
+    """A few lines of text without odd characters, cut at a word; "" when there is none."""
+    if not isinstance(v, str):
+        return ""
+    text = " ".join("".join(c if c.isprintable() else " " for c in v).split())
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:.") + "…"
+    return text
 
 
 def _row(v):
@@ -368,6 +392,82 @@ def _write_chosen(data):
     return _write_private(CHOSEN_FILE, data) and _write_private(LAUNCH_FILE, allowed)
 
 
+def _about_query(nvidia, language):
+    """The question for one game, by Nvidia's number: its genres and a few lines about it."""
+    return ('{apps(country:"%s" language:"%s" first:1 filters:{variants:{id:{in:[%s]}}}){'
+            "items{genres shortDescription variants{id}}}}" % (COUNTRY, language, nvidia))
+
+
+def _fetch_about(nvidia, language):
+    """{"genres", "summary"} for one game as Nvidia tells it now, or None when it did not answer.
+    A game the catalogue no longer has comes back empty."""
+    apps = _ask(_about_query(nvidia, language))
+    if apps is None:
+        return None
+    items = apps.get("items")
+    for item in items if isinstance(items, list) else ():
+        variants = item.get("variants") if isinstance(item, dict) else None
+        # Only the game that was asked for: an answer about another one is not believed.
+        if not any(isinstance(v, dict) and v.get("id") == nvidia for v in (variants if isinstance(variants, list) else ())):
+            continue
+        genres = item.get("genres")
+        genres = [g for g in (genres if isinstance(genres, list) else ()) if isinstance(g, str) and _GENRE.fullmatch(g)]
+        return {"genres": genres[:MAX_GENRES], "summary": _text(item.get("shortDescription"), MAX_SUMMARY)}
+    return {"genres": [], "summary": ""}
+
+
+def _read_about():
+    """{"number:language": {"read": seconds, "genres": [...], "summary": text}} as last kept."""
+    out = {}
+    try:
+        with open(ABOUT_FILE, encoding="utf-8") as f:
+            raw = json.load(f)
+        for key, known in raw.items():
+            nvidia, _, language = key.partition(":")
+            read = known.get("read") if isinstance(known, dict) else None
+            if not _digits(nvidia) or language not in LANGUAGES or isinstance(read, bool) or not isinstance(read, (int, float)):
+                continue
+            genres = known.get("genres")
+            out[key] = {
+                "read": read,
+                "genres": [g for g in (genres if isinstance(genres, list) else ()) if isinstance(g, str) and _GENRE.fullmatch(g)][:MAX_GENRES],
+                "summary": _text(known.get("summary"), MAX_SUMMARY),
+            }
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return out
+
+
+def _about(nvidia, language, chosen):
+    """What is known of one chosen game, asked to Nvidia when it is new or a week old. None when
+    nothing is known and Nvidia did not answer. Only the chosen games' facts stay on disk."""
+    key = "%s:%s" % (nvidia, language)
+    with _about_lock:
+        kept = _read_about()
+        known = kept.get(key)
+        fresh = known is not None and 0 <= time.time() - known["read"] < ABOUT_AGE
+        tried = _about_tried.get(key)
+        if fresh or (tried is not None and time.monotonic() - tried < RETRY):
+            return known
+        got = _fetch_about(nvidia, LANGUAGES[language])
+        if got is None:
+            _about_tried[key] = time.monotonic()
+            return known
+        _about_tried.pop(key, None)
+        kept[key] = {"read": int(time.time()), **got}
+        _write_private(ABOUT_FILE, {k: v for k, v in kept.items() if k.partition(":")[0] in chosen})
+        return kept[key]
+
+
+def _forget_about(nvidia):
+    """Drops what was kept of a game the player took out."""
+    with _about_lock:
+        kept = _read_about()
+        left = {k: v for k, v in kept.items() if k.partition(":")[0] != nvidia}
+        if len(left) != len(kept):
+            _write_private(ABOUT_FILE, left)
+
+
 def _fetch_art(url):
     """A picture from Nvidia's picture server as (bytes, "jpg" or "png"), or None."""
     if not _art_url(url):
@@ -474,7 +574,9 @@ class Plugin:
             if not nvidia or nvidia not in data["games"]:
                 return {"ok": False}
             del data["games"][nvidia]
-            return {"ok": _write_chosen(data)}
+            ok = _write_chosen(data)
+        _forget_about(nvidia)
+        return {"ok": ok}
 
     async def art(self, id, kind):
         """One of a game's pictures, for its Steam entry: the cover ("box") or the wide one ("hero")."""
@@ -486,6 +588,20 @@ class Plugin:
         if not got:
             return {"ok": False}
         return {"ok": True, "data": base64.b64encode(got[0]).decode("ascii"), "kind": got[1]}
+
+    async def about(self, id, language):
+        """What the catalogue says of a game the player chose, for its page: the shop, the genres
+        and a few lines about it, in the page's language."""
+        nvidia = _digits(str(id)) if _number(id) else None
+        if not nvidia or not isinstance(language, str) or language not in LANGUAGES:
+            return {"ok": False}
+        with _chosen_lock:
+            games = _read_chosen()["games"]
+        if nvidia not in games:
+            return {"ok": False}
+        known = await asyncio.to_thread(_about, nvidia, language, set(games))
+        return {"ok": True, "store": games[nvidia]["store"], "genres": known["genres"] if known else [],
+                "summary": known["summary"] if known else ""}
 
     async def _main(self):
         _install_launcher()

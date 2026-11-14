@@ -1,5 +1,5 @@
 import { definePlugin } from "@decky/api";
-import { loadChosen, shelves } from "./chosen";
+import { game, loadChosen, owns, shelves } from "./chosen";
 import { actions } from "./play";
 import { OwnPanel, Settings } from "./Settings";
 import { tuckAway } from "./tuck";
@@ -24,9 +24,10 @@ function CloudIcon() {
 }
 
 export default definePlugin(() => {
-  // What this plugin shows goes through Vistazo: a button on its game pages, a shelf on its home
-  // and a section in its settings. Without Vistazo it only has its own panel.
-  const leave = joinVistazo({ id: "geforcenow", name: "GeForce NOW", contract: CONTRACT, actions, shelves, Settings });
+  // What this plugin shows goes through Vistazo: a button on its game pages, the page of the
+  // games the player added, a shelf on its home and a section in its settings. Without Vistazo
+  // it only has its own panel.
+  const leave = joinVistazo({ id: "geforcenow", name: "GeForce NOW", contract: CONTRACT, owns, game, actions, shelves, Settings });
   const untuck = tuckAway(NAME, "vistazo-geforcenow");
   loadChosen().catch((e) => console.warn("[Vistazo GeForce NOW] chosen games", e));
   return {

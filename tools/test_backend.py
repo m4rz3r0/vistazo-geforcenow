@@ -593,6 +593,91 @@ def test_art():
         os.path.join(REPO, "main.py")).read())
 
 
+def about_kept():
+    with open(main.ABOUT_FILE) as f:
+        return json.load(f)
+
+
+def test_about():
+    # What a chosen game's page is told: its shop, genres and a few lines, in the page's language.
+    for game in run(plugin.chosen()):
+        run(plugin.unchoose(game["id"]))
+    nvidia.down, nvidia.redirect_to, nvidia.padding = False, None, 0
+    long_text = "word " * 400
+    nvidia.pages = [[
+        {"title": "Other", "genres": ["PUZZLE"], "shortDescription": "Not this one.", "variants": [("STEAM", "9", "40001")]},
+        {"title": "Fort", "genres": ["ACTION", "bad genre", 7, "FREE_TO_PLAY"], "shortDescription": "Drop in.\n\tBuild\x00 and fight.",
+         "variants": [("EPIC", "fn", "40000"), ("STEAM", "8", "40002")]},
+        {"title": "Long", "genres": ["A%d" % n for n in range(9)], "shortDescription": long_text, "variants": [("STEAM", "7", "40003")]},
+        {"title": "Bare", "variants": [("GOG", "b", "40004")]},
+    ]]
+    check("read", run(plugin.refresh())["ok"], True)
+    for n, appid in (("40000", 3000000001), ("40003", 3000000002), ("40004", 3000000003)):
+        check("chosen %s" % n, run(plugin.choose(n, appid)), {"ok": True})
+
+    nvidia.asked.clear()
+    check("a chosen game", run(plugin.about("40000", "es")),
+          {"ok": True, "store": "EPIC", "genres": ["ACTION", "FREE_TO_PLAY"], "summary": "Drop in. Build and fight."})
+    check("one question", len(nvidia.asked), 1)
+    check("the question", nvidia.asked[0][2],
+          '{apps(country:"US" language:"es_ES" first:1 filters:{variants:{id:{in:[40000]}}}){'
+          "items{genres shortDescription variants{id}}}}")
+    check("same address", nvidia.asked[0][0], "/services/gfngames/v1/gameList")
+    check("kept, private", (mode(main.ABOUT_FILE), sorted(about_kept())), (0o600, ["40000:es"]))
+    check("again: from the file", run(plugin.about(40000, "es"))["summary"], "Drop in. Build and fight.")
+    check("Nvidia not asked again", len(nvidia.asked), 1)
+    check("the other language is asked apart", (run(plugin.about("40000", "en"))["ok"], 'language:"en_US"' in nvidia.asked[-1][2]), (True, True))
+
+    got = run(plugin.about("40003", "en"))
+    check("genres capped", got["genres"], ["A%d" % n for n in range(main.MAX_GENRES)])
+    check("text cut at a word", (len(got["summary"]) <= main.MAX_SUMMARY, got["summary"].endswith("word…")), (True, True))
+    check("nothing to tell", run(plugin.about("40004", "es")), {"ok": True, "store": "GOG", "genres": [], "summary": ""})
+
+    # Only the games the player chose, and only the two languages; nothing is asked otherwise.
+    nvidia.asked.clear()
+    for bad in ("40001", "40002", 999, "abc", None, True, 0, "40000:es", "40000]}}){x", ["40000"]):
+        check("about %r" % (bad,), run(plugin.about(bad, "es")), {"ok": False})
+    for bad in ("fr", "es_ES", "", None, 5, ["es"], 'es" x:"'):
+        check("language %r" % (bad,), run(plugin.about("40000", bad)), {"ok": False})
+    check("nothing was asked for those", nvidia.asked, [])
+
+    # A week later it is asked again; while Nvidia is down the last answer stays, and the next
+    # try waits.
+    old = about_kept()
+    old["40000:es"]["read"] -= main.ABOUT_AGE + 60
+    with open(main.ABOUT_FILE, "w") as f:
+        json.dump(old, f)
+    nvidia.down = True
+    check("down: the last answer", run(plugin.about("40000", "es"))["summary"], "Drop in. Build and fight.")
+    check("asked once", len(nvidia.asked), 1)
+    check("not asked again right away", (run(plugin.about("40000", "es"))["ok"], len(nvidia.asked)), (True, 1))
+    nvidia.down = False
+    main._about_tried.clear()
+    nvidia.pages[0][1]["shortDescription"] = "New words."
+    check("asked again", run(plugin.about("40000", "es"))["summary"], "New words.")
+    nvidia.redirect_to = "http://127.0.0.1:%d/services/gfngames/v1/gameList" % other.server_port
+    run(plugin.unchoose("40003"))
+    main._about_tried.clear()
+    old = about_kept()
+    old["40004:es"]["read"] -= main.ABOUT_AGE + 60
+    with open(main.ABOUT_FILE, "w") as f:
+        json.dump(old, f)
+    check("redirect refused", run(plugin.about("40004", "es")), {"ok": True, "store": "GOG", "genres": [], "summary": ""})
+    check("nothing went elsewhere", Elsewhere.hits, [])
+    nvidia.redirect_to = None
+
+    # A game that is no longer chosen is forgotten, in both languages.
+    check("the one taken out is gone from disk", sorted(about_kept()), ["40000:en", "40000:es", "40004:es"])
+    run(plugin.unchoose("40000"))
+    check("both languages forgotten", sorted(about_kept()), ["40004:es"])
+    check("and no longer answered", run(plugin.about("40000", "es")), {"ok": False})
+    with open(main.ABOUT_FILE, "w") as f:
+        f.write('{"40000:es": {"read": true, "genres": "x"}, "x:es": {"read": 1}, "40000:fr": {"read": 1}, "40004:es": 5}')
+    check("odd file: read as empty", main._read_about(), {})
+    check("only Nvidia's own address", 'CATALOGUE_URL = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"' in open(
+        os.path.join(REPO, "main.py")).read())
+
+
 try:
     test_catalogue()
     test_stale()
@@ -600,6 +685,7 @@ try:
     test_launcher()
     test_chosen()
     test_art()
+    test_about()
     print("ok: %d checks" % checks)
 finally:
     server.shutdown()

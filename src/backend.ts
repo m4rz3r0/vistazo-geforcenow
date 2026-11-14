@@ -41,4 +41,12 @@ export const entry = callable<[], { ok: boolean; exe?: string; start_dir?: strin
 export const chosen = callable<[], Chosen[]>("chosen");
 export const choose = callable<[id: string, appid: number], { ok: boolean }>("choose");
 export const unchoose = callable<[id: string], { ok: boolean }>("unchoose");
+// What the catalogue says of a chosen game, in the page's language.
+export interface About {
+  ok: boolean;
+  store?: string;
+  genres?: string[]; // as Nvidia names them: "ROLE_PLAYING"
+  summary?: string;
+}
+export const about = callable<[id: string, language: "es" | "en"], About>("about");
 export const art = callable<[id: string, kind: "box" | "hero"], Picture>("art");

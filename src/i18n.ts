@@ -88,6 +88,36 @@ const SHOPS: Record<string, string> = {
 export const shop = (store: string): string =>
   SHOPS[store] ?? store.toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
 
+// A kind of game as people say it. Nvidia names them in capitals ("ROLE_PLAYING"); the ones
+// that say nothing about the game itself (a demo, free to play) are left out.
+const GENRES: Record<string, [es: string, en: string]> = {
+  ACTION: ["Acción", "Action"],
+  ADVENTURE: ["Aventura", "Adventure"],
+  ARCADE: ["Arcade", "Arcade"],
+  CASUAL: ["Casual", "Casual"],
+  FAMILY: ["Familiar", "Family"],
+  FIGHTING: ["Lucha", "Fighting"],
+  FIRST_PERSON_SHOOTER: ["Disparos", "Shooter"],
+  INDIE: ["Indie", "Indie"],
+  MASSIVELY_MULTIPLAYER_ONLINE: ["Multijugador masivo", "Massively multiplayer"],
+  MULTIPLAYER_ONLINE_BATTLE_ARENA: ["MOBA", "MOBA"],
+  PLATFORMER: ["Plataformas", "Platformer"],
+  PUZZLE: ["Puzles", "Puzzle"],
+  RACING: ["Carreras", "Racing"],
+  ROLE_PLAYING: ["Rol", "Role-playing"],
+  SIMULATION: ["Simulación", "Simulation"],
+  SPORTS: ["Deportes", "Sports"],
+  STRATEGY: ["Estrategia", "Strategy"],
+  DEMO: ["", ""],
+  TECH_DEMO: ["", ""],
+  FREE_TO_PLAY: ["", ""],
+};
+export const genre = (name: string): string => {
+  const known = GENRES[name];
+  if (known) return known[lang === "es" ? 0 : 1];
+  return name.toLowerCase().replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+};
+
 // How long ago the list was read, in the largest unit that fits.
 export function readAgo(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
