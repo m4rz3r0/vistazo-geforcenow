@@ -2,8 +2,8 @@
 
 An add-on for [Vistazo](https://github.com/m4rz3r0/vistazo-decky), the calm home screen and game pages for the Steam Deck. It adds a **GeForce NOW** button (Nvidia's mark, in its green) to Vistazo's page of a Steam game, right beside Steam's own play button, when Nvidia's service carries that game. Pressing it opens the game in Nvidia's own GeForce NOW app.
 
-**Experimental.** Finding games, adding them to Steam and the shelf in Vistazo work. Starting a game straight
-from its entry has not been tried on a Deck with Nvidia's app yet: if it only opens the app, that is the known gap.
+The button on Steam game pages and starting a game you added from its own entry have both been tried on a Deck
+with Nvidia's app. It is a young add-on all the same: tell us what does not work.
 
 It is a separate Decky plugin so that only those who use GeForce NOW carry its code.
 
