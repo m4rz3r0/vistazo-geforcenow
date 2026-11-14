@@ -1,6 +1,6 @@
 {
   "name": "vistazo-geforcenow",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Add-on for Vistazo: a button to play a Steam game on GeForce NOW, through Nvidia's own app.",
   "type": "module",
   "private": true,
